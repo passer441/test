@@ -623,9 +623,9 @@ class OLEDMeasurementApp:
             
         target_mA = float(target_str)
         target_A = target_mA / 1000.0
-        tolerance_A = target_A * 0.05
         low, high = 0, 255
         best_gray = 0
+        min_diff = float('inf')
         
         self.tune_status.set("블랙 화면 전환/Offset 측정 중...")
         self.log_message("블랙 화면 전환 및 Offset 전류 측정 중 (2초 대기)...")
@@ -651,6 +651,7 @@ class OLEDMeasurementApp:
         time.sleep(0.5)
         
         self.log_message(f"목표 보정 전류 {target_mA:.4f}mA 튜닝 시작 (Offset: {offset_mA:.4f}mA)")
+
         
         while low <= high:
             mid = (low + high) // 2
@@ -662,18 +663,27 @@ class OLEDMeasurementApp:
     
             curr_A = RealDevice.get_keithley_data()
             comp_A = curr_A - offset_A
-            comp_mA = comp_A * 1000.0
     
-            if abs(comp_A - target_A) <= tolerance_A:
+            # 타겟과 현재 측정값의 오차 계산
+            diff = abs(comp_A - target_A)
+    
+            # 오차가 가장 작은 Gray 값 갱신
+            if diff < min_diff:
+                min_diff = diff
                 best_gray = mid
-                break
-            elif comp_A < target_A:
+        
+            # 전류가 타겟보다 작으면 Gray를 높이고, 크면 낮춤
+            if comp_A < target_A:
                 low = mid + 1
             else:
                 high = mid - 1
-                
-        best_gray = mid
+
+        # 탐색 완료 후 가장 타겟에 가까웠던 Gray 색상으로 최종 변경
         self.change_ppt_shape_color(best_gray)
+        self.root.update()  
+        time.sleep(0.3)    
+                
+
         final_curr_A = RealDevice.get_keithley_data()
         final_comp_A = final_curr_A - offset_A
         final_curr_mA = final_curr_A * 1000.0
