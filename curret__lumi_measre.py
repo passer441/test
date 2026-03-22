@@ -203,7 +203,7 @@ class OLEDMeasurementApp:
         self.k_port = tk.StringVar(value="COM3")
         self.k_baud = tk.StringVar(value="9600")
         self.k_volt = tk.StringVar(value="10V")
-        self.k_curr_limit = tk.StringVar(value="1.5")
+        self.k_curr_limit = tk.StringVar(value="1.05")
         
         self.ca_sync = tk.StringVar(value="Universal")
         self.ca_mem = tk.IntVar(value=1)
@@ -655,14 +655,15 @@ class OLEDMeasurementApp:
         while low <= high:
             mid = (low + high) // 2
             self.change_ppt_shape_color(mid)
-            curr_A = RealDevice.get_keithley_data()
-            comp_A = curr_A - offset_A
-            comp_mA = comp_A * 1000.0
-            
+    
             self.tune_status.set(f"튜닝 중... Gray: {mid}")
             self.root.update()
             time.sleep(0.3)
-            
+    
+            curr_A = RealDevice.get_keithley_data()
+            comp_A = curr_A - offset_A
+            comp_mA = comp_A * 1000.0
+    
             if abs(comp_A - target_A) <= tolerance_A:
                 best_gray = mid
                 break
