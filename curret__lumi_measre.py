@@ -16,9 +16,6 @@ except ImportError:
     WIN32_AVAILABLE = False
 
 class RealDevice:
-    # [타 AI 및 EXAONE을 위한 상세 주석]
-    # 이 클래스는 가상 장비 대신 실제 Keithley 2400과 Konica Minolta CA-310 장비를 제어합니다.
-    
     current_gray = 0
     keithley_inst = None 
     ca_app = None        
@@ -27,69 +24,60 @@ class RealDevice:
     ca_memory = None     
 
     @classmethod
-    def connect_keithley(cls, port, baud, curr_limit):
-        """
-        Keithley 2400 장비와 시리얼 통신(pyserial) 연결을 설정합니다.
-        SCPI 명령어를 사용하여 장비를 초기화하고 전압을 인가하며 전류를 측정할 준비를 합니다.
-        """
+    def connect_keithley(cls, port, baud, curr_limit, curr_range):
         try:
-            # 1. 시리얼 포트 연결 (Timeout 1초)
             cls.keithley_inst = serial.Serial(port, int(baud), timeout=1)
-            
-            # 2. 장비 초기화 (*RST: Reset)
             cls.keithley_inst.write(b"*RST\n")
             time.sleep(0.1)
             
-            # 3. 순수 전류계(Ammeter) 모드 설정: 전압 출력을 0V로 고정하여 회로에 영향을 주지 않음
             cls.keithley_inst.write(b":SOUR:FUNC VOLT\n")
             cls.keithley_inst.write(b":SOUR:VOLT 0\n")
-            
-            # [추가] UI에서 입력받은 전류 제한(Compliance) 값 설정
             cls.keithley_inst.write(f":SENS:CURR:PROT {curr_limit}\n".encode('utf-8'))
             
-            # 4. 전류 측정 기능 활성화 (:SENS:FUNC 'CURR')
             cls.keithley_inst.write(b":SENS:FUNC 'CURR'\n")
             
-            # 5. 장비 출력 켜기 (:OUTP ON)
+            range_map = {"10uA": "10e-6", "100uA": "100e-6", "1mA": "1e-3", "10mA": "10e-3", "100mA": "100e-3", "1A": "1"}
+            r_val = range_map.get(curr_range, "100e-3")
+            cls.keithley_inst.write(b":SENS:CURR:RANG:AUTO OFF\n")
+            cls.keithley_inst.write(f":SENS:CURR:RANG {r_val}\n".encode('utf-8'))
+            
             cls.keithley_inst.write(b":OUTP ON\n")
             
-            return True, f"[{port}] 실제 Keithley 2400 연결 성공"
+            return True, f"[{port}] 실제 Keithley 2400 연결 성공 (Range: {curr_range})"
         except Exception as e:
             return False, f"Keithley 연결 실패: {e}"
 
     @classmethod
-    def connect_ca310(cls, sync_mode, channel, display_mode):
-        """
-        CA-310 장비와 CA-SDK(win32com)를 통해 USB 통신 연결을 설정합니다.
-        매뉴얼에 따라 단일 장비 및 단일 프로브를 대상으로 자동 설정(AutoConnect)을 수행합니다.
-        """
+    def change_range(cls, curr_range):
+        if not cls.keithley_inst:
+            return False, "장비가 연결되어 있지 않습니다."
         try:
-            # [추가] 64비트 파이썬 강제 종료 방지
+            range_map = {"10uA": "10e-6", "100uA": "100e-6", "1mA": "1e-3", "10mA": "10e-3", "100mA": "100e-3", "1A": "1"}
+            r_val = range_map.get(curr_range, "100e-3")
+            cls.keithley_inst.write(f":SENS:CURR:RANG {r_val}\n".encode('utf-8'))
+            return True, f"측정 Range가 {curr_range}로 실시간 변경되었습니다."
+        except Exception as e:
+            return False, f"Range 변경 실패: {e}"
+
+    @classmethod
+    def connect_ca310(cls, sync_mode, channel, display_mode):
+        try:
             if sys.maxsize > 2**32:
                 return False, "64비트 파이썬 환경입니다. CA-SDK는 32비트 환경에서만 동작하므로 연결할 수 없습니다."
                 
             if not WIN32_AVAILABLE:
                 return False, "win32com 모듈을 사용할 수 없습니다."
 
-            # 1. CA-SDK Application 루트 객체 생성 (타입 라이브러리에 정의된 CA200Srvr)
             cls.ca_app = win32com.client.Dispatch("CA200Srvr.Ca200")
-            
-            # 2. AutoConnect 실행 (USB에 연결된 1대의 장비와 1개의 프로브를 자동 인식하여 구성 설정)
             cls.ca_app.AutoConnect()
             
-            # 3. 하위 제어 객체 생성
             cls.ca_obj = cls.ca_app.SingleCa        
             cls.ca_probe = cls.ca_obj.SingleProbe   
             cls.ca_memory = cls.ca_obj.Memory       
             
-            # 4. Sync Mode 설정 (Universal: 3, NTSC: 0, PAL: 1)
             sync_dict = {"Universal": 3, "NTSC": 0, "PAL": 1}
             cls.ca_obj.SyncMode = sync_dict.get(sync_mode, 3)
-            
-            # 5. 메모리 채널 번호 매핑
             cls.ca_memory.ChannelNO = int(channel)
-            
-            # 6. 측정 디스플레이 모드 설정
             cls.ca_obj.DisplayMode = int(display_mode)
             
             return True, "[USB] 실제 CA-310 연결 성공"
@@ -98,13 +86,8 @@ class RealDevice:
 
     @classmethod
     def perform_zero_cal(cls):
-        """
-        CA-310 장비의 영점 교정(Zero Calibration)을 실행합니다.
-        실제 광학 측정을 진행하기 전에 노이즈 보정을 위해 반드시 선행되어야 합니다.
-        """
         try:
             if cls.ca_obj:
-                # CalZero 메서드 호출 시 영점 교정 절차 수행
                 cls.ca_obj.CalZero()
                 return True, "실제 CA-310 Zero Calibration 완료"
             return False, "CA-310 장비 객체가 초기화되지 않았습니다."
@@ -113,24 +96,18 @@ class RealDevice:
 
     @classmethod
     def get_keithley_data(cls):
-        """
-        Keithley 2400에 SCPI 읽기 명령을 전달하고 현재 흐르는 전류(A) 값을 반환합니다.
-        """
         try:
             if cls.keithley_inst:
-                # 1. 단일 측정 수행 및 버퍼에 결과 요청
                 cls.keithley_inst.write(b":READ?\n")
-                
-                # 2. 결과 값 읽어오기 (결과 형식은 CSV 형태로 전압, 전류, 저항, 시간, 상태 값을 반환함)
                 data = cls.keithley_inst.readline().decode('utf-8').strip()
-                
                 if data:
                     values = data.split(',')
-                    # 3. 배열에서 1번째 인덱스인 전류(Current) 값을 추출해 실수 변환
-                    # [추가] 타임아웃 및 데이터 파싱 에러 방지
                     if len(values) >= 2:
                         try:
-                            return float(values[1])
+                            val = float(values[1])
+                            if val > 1e30: 
+                                return float('inf')
+                            return val
                         except ValueError:
                             return 0.0
             return 0.0
@@ -140,30 +117,24 @@ class RealDevice:
 
     @classmethod
     def get_ca310_data(cls):
-        """
-        CA-310 장비에 광학 측정을 지시하고 설정된 모드에 맞는 데이터를 반환합니다.
-        """
         try:
             if cls.ca_obj and cls.ca_probe:
-                # 1. 측정 실행 트리거 (Measure 메서드 호출)
                 cls.ca_obj.Measure()
-                
-                # 2. 현재 설정된 DisplayMode 확인하여 데이터 취득
                 mode = cls.ca_obj.DisplayMode
                 
-                if mode == 7: # XYZ 모드
+                if mode == 7: 
                     lv = cls.ca_probe.Y
                     sx = cls.ca_probe.X
                     sy = cls.ca_probe.Z
-                elif mode == 1: # Tduv 모드
+                elif mode == 1: 
                     lv = cls.ca_probe.Lv
                     sx = cls.ca_probe.T
                     sy = cls.ca_probe.duv
-                elif mode == 5: # u'v' 모드
+                elif mode == 5: 
                     lv = cls.ca_probe.Lv
                     sx = cls.ca_probe.ud
                     sy = cls.ca_probe.vd
-                else: # 기본 Lvxy 모드 (0)
+                else: 
                     lv = cls.ca_probe.Lv
                     sx = cls.ca_probe.sx
                     sy = cls.ca_probe.sy
@@ -176,23 +147,19 @@ class RealDevice:
             
     @classmethod
     def release_devices(cls):
-        """
-        애플리케이션 종료 시 장비와의 통신 포트 및 COM 객체를 안전하게 반환합니다.
-        """
         try:
             if cls.keithley_inst:
-                # 출력을 끄고 시리얼 포트를 해제함
                 cls.keithley_inst.write(b":OUTP OFF\n")
                 cls.keithley_inst.close()
                 cls.keithley_inst = None
                 
-            # CA-SDK 관련 COM 객체들을 해제함
             cls.ca_obj = None
             cls.ca_probe = None
             cls.ca_memory = None
             cls.ca_app = None
         except Exception as e:
             print(f"장비 연결 해제 중 오류 발생: {e}")
+
 
 class OLEDMeasurementApp:
     def __init__(self, root):
@@ -205,15 +172,16 @@ class OLEDMeasurementApp:
         self.k_volt = tk.StringVar(value="10V")
         self.k_curr_limit = tk.StringVar(value="1.05")
         
+        self.k_curr_range = tk.StringVar(value="100mA") 
+        self.k_range_desc = tk.StringVar(value="최대 측정 범위: 100mA") 
+        self.k_curr_range.trace_add("write", self.update_range_desc)
+        
         self.ca_sync = tk.StringVar(value="Universal")
         self.ca_mem = tk.IntVar(value=1)
-        self.ca_disp_mode = tk.StringVar(value="Lvxy") # 색좌표 모드 변수 추가
+        self.ca_disp_mode = tk.StringVar(value="Lvxy") 
         
-        self.ppt_path = tk.StringVar(value="선택된 파일 없음")
-        self.temp_ppt_path = None  # 임시 파일 경로 저장 변수 추가
-        
-        self.slides = []
-        self.current_slide_idx = 0
+        self.slides_dict = {}
+        self.current_slide_idx = 1
         self.measure_results = []
         self.slideshow_started = False
         self.is_black_screen = False
@@ -227,12 +195,15 @@ class OLEDMeasurementApp:
         self.loc_var = tk.StringVar(value="대기 중")
         self.tune_target_curr = tk.StringVar(value="N/A")
         self.tune_status = tk.StringVar(value="1번 슬라이더 대기 중")
-        self.meas_status = tk.StringVar(value="1번 슬라이더 대기 중")  # 5번 탭 진행 상태 변수 추가
+        self.meas_status = tk.StringVar(value="1번 슬라이더 대기 중")  
         self.slide_num_var = tk.StringVar(value="- / -")
+        self.current_gray_var = tk.StringVar(value="확인 대기")
         
         self.setup_ui()
-        # 닫기 버튼 이벤트 연결
         self.root.protocol("WM_DELETE_WINDOW", self.close_app)
+
+    def update_range_desc(self, *args):
+        self.k_range_desc.set(f"최대 측정 범위: {self.k_curr_range.get()}")
 
     def setup_ui(self):
         main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
@@ -244,7 +215,7 @@ class OLEDMeasurementApp:
 
         self.tab1 = ttk.Frame(self.tabs); self.tabs.add(self.tab1, text="1. Keithley 설정")
         self.tab2 = ttk.Frame(self.tabs); self.tabs.add(self.tab2, text="2. CA-310 설정")
-        self.tab3 = ttk.Frame(self.tabs); self.tabs.add(self.tab3, text="3. PPT 로드")
+        self.tab3 = ttk.Frame(self.tabs); self.tabs.add(self.tab3, text="3. PPT 동기화")
         self.tab4 = ttk.Frame(self.tabs); self.tabs.add(self.tab4, text="4. Gray 튜닝")
         self.tab5 = ttk.Frame(self.tabs); self.tabs.add(self.tab5, text="5. 측정 실행")
 
@@ -286,12 +257,28 @@ class OLEDMeasurementApp:
         ttk.Entry(form, textvariable=self.k_baud).grid(row=1, column=1, padx=10, sticky="w")
         ttk.Label(form, text="전류 리미트(A):").grid(row=2, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.k_curr_limit).grid(row=2, column=1, padx=10, sticky="w")
+        ttk.Label(form, text="측정 Range:").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Combobox(form, textvariable=self.k_curr_range, values=["10uA", "100uA", "1mA", "10mA", "100mA", "1A"]).grid(row=3, column=1, padx=10, sticky="w")
+        ttk.Label(form, textvariable=self.k_range_desc, foreground="blue").grid(row=3, column=2, sticky="w", padx=10)
+        ttk.Button(form, text="Range 실시간 적용", command=self.apply_range_action).grid(row=3, column=3, padx=10, sticky="w")
         
-        ttk.Button(form, text="장비 연결 실행", command=self.connect_keithley_action).grid(row=3, column=0, columnspan=2, pady=15)
+        ttk.Button(form, text="장비 연결 실행", command=self.connect_keithley_action).grid(row=4, column=0, columnspan=2, pady=15)
 
     def connect_keithley_action(self):
-        self.k_connected, details = RealDevice.connect_keithley(self.k_port.get(), self.k_baud.get(), self.k_curr_limit.get())
+        self.k_connected, details = RealDevice.connect_keithley(self.k_port.get(), self.k_baud.get(), self.k_curr_limit.get(), self.k_curr_range.get())
         self.log_message(details)
+
+    def apply_range_action(self):
+        if not self.k_connected:
+            messagebox.showwarning("경고", "먼저 장비를 연결해 주세요,,,")
+            return
+        success, msg = RealDevice.change_range(self.k_curr_range.get())
+        if success:
+            self.log_message(msg)
+            messagebox.showinfo("성공", msg)
+        else:
+            self.log_message(msg)
+            messagebox.showerror("오류", msg)
 
     def build_ca310_tab(self):
         frame = ttk.Frame(self.tab2, padding=20)
@@ -318,7 +305,6 @@ class OLEDMeasurementApp:
         self.ca_connected, details = RealDevice.connect_ca310(self.ca_sync.get(), self.ca_mem.get(), mode_val)
         self.log_message(details)
         if self.ca_connected:
-            # 선택된 모드에 따라 측정 결과 표의 헤더를 동적으로 변경합니다.
             mode = self.ca_disp_mode.get()
             if mode == "XYZ":
                 self.measure_tree.heading("lv", text="Y")
@@ -350,11 +336,20 @@ class OLEDMeasurementApp:
     def build_ppt_tab(self):
         frame = ttk.Frame(self.tab3, padding=20)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="실제 PPT 로드", font=("Malgun Gothic", 16, "bold")).pack(pady=20)
-        file_frame = ttk.Frame(frame)
-        file_frame.pack(pady=10)
-        ttk.Entry(file_frame, textvariable=self.ppt_path, width=50).pack(side="left", padx=5)
-        ttk.Button(file_frame, text="파일 선택", command=self.load_ppt_action).pack(side="left")
+        ttk.Label(frame, text="파워포인트 동기화", font=("Malgun Gothic", 16, "bold")).pack(pady=10)
+        
+        warning_frame = ttk.LabelFrame(frame, text=" 필수 주의사항 ", padding=10)
+        warning_frame.pack(fill="x", pady=10)
+        
+        warn_text = (
+            "1. 동기화 작업은 반드시 파워포인트 '일반 편집 화면' 상태에서 실행해야 합니다.\n"
+            "2. 동기화 완료 후 파이썬으로 장비를 제어하려면 반드시 '슬라이드 쇼(F5)' 상태여야 합니다."
+        )
+        ttk.Label(warning_frame, text=warn_text, font=("Malgun Gothic", 12, "bold"), foreground="red", justify="center").pack(pady=10)
+
+        sync_frame = ttk.Frame(frame)
+        sync_frame.pack(pady=10)
+        ttk.Button(sync_frame, text="PPT 동기화 실행", command=self.resync_ppt_action, width=20).pack()
         
         guide_text = (
             "첫 번째 슬라이드에는 offset 전류를 측정하도록 블랙 슬라이드를 추가해 주세요!\n"
@@ -365,61 +360,57 @@ class OLEDMeasurementApp:
         self.info_lbl = ttk.Label(frame, text=guide_text, justify="left", foreground="blue")
         self.info_lbl.pack(pady=20)
 
-    def load_ppt_action(self):
-        if not WIN32_AVAILABLE: return
-        original_path = filedialog.askopenfilename(filetypes=[("PowerPoint", "*.pptx;*.ppt")])
-        if original_path:
-            # ---------------------------------------------------------
-            # 로딩 시작 안내 창 띄우기 (업데이트)
-            # ---------------------------------------------------------
-            loading_win = tk.Toplevel(self.root)
-            loading_win.title("PPT 파일 로드 중")
-            loading_win.geometry("300x100")
-            # 모달 창으로 설정 (사용자가 다른 작업 못하게)
-            loading_win.transient(self.root)
-            loading_win.grab_set()
+    def resync_ppt_action(self):
+        try:
+            self.ppt_app = win32com.client.GetActiveObject("PowerPoint.Application")
             
-            tk.Label(loading_win, text="PPT 파일을 분석 중입니다...\n잠시만 기다려 주세요.", font=("Malgun Gothic", 11)).pack(expand=True)
-            self.root.update()
-            
+            was_in_slideshow = False
+            saved_idx = 1
             try:
-                # 1. 파일 경로 정제
-                original_path = original_path.replace('/', '\\')
+                if self.ppt_app.SlideShowWindows.Count > 0:
+                    was_in_slideshow = True
+                    saved_idx = self.ppt_app.SlideShowWindows(1).View.Slide.SlideIndex
+                    self.ppt_app.SlideShowWindows(1).View.Exit()
+                    time.sleep(0.5)
+            except:
+                pass
                 
-                # 2. 임시 파일(_temp) 경로 생성
-                base_name, ext = os.path.splitext(original_path)
-                temp_path = f"{base_name}_temp{ext}"
+            self.presentation = self.ppt_app.ActivePresentation
+            
+            slide_count = self.presentation.Slides.Count
+            self.slides_dict = {}
+            for i in range(1, slide_count + 1):
+                slide = self.presentation.Slides(i)
+                note = ""
+                try:
+                    for shape in slide.NotesPage.Shapes:
+                        if shape.HasTextFrame and shape.TextFrame.HasText:
+                            t = shape.TextFrame.TextRange.Text.strip()
+                            if len(t) > len(note): note = t
+                except: pass
+                self.slides_dict[i] = note if note else f"Slide {i}"
+            
+            if was_in_slideshow:
+                self.presentation.SlideShowSettings.Run()
+                time.sleep(0.5)
+                try:
+                    self.presentation.SlideShowWindow.View.GotoSlide(saved_idx)
+                    self.current_slide_idx = self.presentation.SlideShowWindow.View.Slide.SlideIndex
+                except:
+                    self.current_slide_idx = 1
+                self.slideshow_started = True
+            else:
+                self.current_slide_idx = 1
+                self.slideshow_started = False
                 
-                # 3. 원본 파일을 임시 파일로 복사
-                shutil.copy2(original_path, temp_path)
-                
-                # 4. UI에는 임시 파일 경로를 표시 및 변수에 저장
-                self.ppt_path.set(temp_path)
-                self.temp_ppt_path = temp_path
-                
-                # 5. 파워포인트 앱 시작 및 임시 파일 열기
-                self.ppt_app = win32com.client.Dispatch("PowerPoint.Application")
-                self.presentation = self.ppt_app.Presentations.Open(temp_path, WithWindow=True)
-                
-                slide_count = self.presentation.Slides.Count
-                self.slides = []
-                for i in range(1, slide_count + 1):
-                    slide = self.presentation.Slides(i)
-                    note = ""
-                    try:
-                        for shape in slide.NotesPage.Shapes:
-                            if shape.HasTextFrame and shape.TextFrame.HasText:
-                                t = shape.TextFrame.TextRange.Text.strip()
-                                if len(t) > len(note): note = t
-                    except: pass
-                    self.slides.append(note if note else f"Slide {i}")
-                self.current_slide_idx = 0
-                self.log_message(f"PPT 임시 복사본 로드 완료 ({slide_count}장)")
-            except Exception as e:
-                messagebox.showerror("오류", f"파일 로드 실패: {e}")
-            finally:
-                # 작업 완료 후 로딩 창 닫기
-                loading_win.destroy()
+            self.update_tuning_info()
+            self.tune_status.set(f"{self.current_slide_idx}번 슬라이더 대기 중")
+            self.meas_status.set(f"{self.current_slide_idx}번 슬라이더 대기 중")
+            self.log_message(f"파워포인트 동기화 완료 ({slide_count}장)")
+            messagebox.showinfo("완료", "파워포인트와 동기화되었습니다.")
+        except Exception as e:
+            self.log_message(f"파워포인트 동기화 실패: {e}")
+            messagebox.showerror("오류", f"파워포인트를 찾을 수 없습니다. 파워포인트 파일이 열려있는지 확인하세요.\n{e}")
 
     def build_tuning_tab(self):
         frame = ttk.Frame(self.tab4, padding=10)
@@ -435,7 +426,6 @@ class OLEDMeasurementApp:
         ttk.Label(status_frame, textvariable=self.tune_target_curr, foreground="red", font=("Arial", 10, "bold")).grid(row=1, column=1, sticky="w", padx=10)
         
         ttk.Label(status_frame, text="진행 상태:").grid(row=2, column=0, sticky="w")
-        # 4번 탭 진행 현황 폰트 4배 (약 36pt) 확대
         ttk.Label(status_frame, textvariable=self.tune_status, font=("Arial", 36, "bold")).grid(row=2, column=1, sticky="w", padx=10)
         
         ttk.Label(status_frame, text="슬라이드 번호:").grid(row=3, column=0, sticky="w")
@@ -471,13 +461,15 @@ class OLEDMeasurementApp:
         ttk.Label(status_frame, text="현재 노트:").grid(row=0, column=0, sticky="w")
         ttk.Label(status_frame, textvariable=self.loc_var, foreground="blue").grid(row=0, column=1, sticky="w", padx=10)
         
-        # 5번 탭 진행 상태 추가
         ttk.Label(status_frame, text="진행 상태:").grid(row=1, column=0, sticky="w")
         ttk.Label(status_frame, textvariable=self.meas_status, font=("Arial", 36, "bold")).grid(row=1, column=1, sticky="w", padx=10)
         
         ttk.Label(status_frame, text="슬라이드 번호:").grid(row=2, column=0, sticky="w")
         ttk.Label(status_frame, textvariable=self.slide_num_var, font=("Arial", 40, "bold")).grid(row=2, column=1, sticky="w", padx=10)
         
+        ttk.Label(status_frame, text="현재 패턴 Gray:").grid(row=3, column=0, sticky="w")
+        ttk.Label(status_frame, textvariable=self.current_gray_var, font=("Arial", 12, "bold"), foreground="purple").grid(row=3, column=1, sticky="w", padx=10)
+
         cols = ("no", "slide_num", "label", "target", "gray", "offset", "meas", "comp", "lv", "cx", "cy")
         self.measure_tree = ttk.Treeview(frame, columns=cols, show="headings", height=8)
         for col, text in zip(cols, ["No", "슬라이드", "라벨", "목표(mA)", "Gray", "Offset(mA)", "측정(mA)", "보정(mA)", "휘도(nit)", "cx", "cy"]):
@@ -503,18 +495,20 @@ class OLEDMeasurementApp:
             return False
         try:
             if getattr(self.presentation, 'SlideShowWindow', None) is None:
-                messagebox.showerror("오류", "슬라이드 쇼 창을 찾을 수 없습니다. 슬라이드 쇼를 다시 시작해 주세요.")
+                messagebox.showwarning("안내", "파워포인트 슬라이드 쇼가 실행 중이 아닙니다,,, 파워포인트 화면에서 슬라이드 쇼(F5)를 시작한 후 탭을 이동해 주세요,,,")
                 self.slideshow_started = False
                 return False
             
-            real_idx = self.presentation.SlideShowWindow.View.CurrentShowPosition - 1
-            if real_idx != self.current_slide_idx and 0 <= real_idx < len(self.slides):
+            real_idx = self.presentation.SlideShowWindow.View.Slide.SlideIndex
+            if real_idx != self.current_slide_idx and real_idx in self.slides_dict:
                 self.current_slide_idx = real_idx
                 self.update_tuning_info()
-                self.log_message(f"사용자 임의 조작 감지. 프로그램 슬라이드 동기화 (현재: {real_idx + 1})")
+                self.tune_status.set(f"{real_idx}번 슬라이더 대기 중")
+                self.meas_status.set(f"{real_idx}번 슬라이더 대기 중")
+                self.log_message(f"사용자 임의 조작 감지. 프로그램 슬라이드 동기화 (현재: {real_idx})")
             return True
         except Exception as e:
-            messagebox.showerror("오류", f"파워포인트 제어 권한 상실.\n원인: {e}\n파일을 다시 로드하거나 프로그램을 재시작해 주세요.")
+            messagebox.showwarning("안내", "파워포인트 제어 권한을 잃었습니다,,, 슬라이드 쇼가 강제로 종료되었을 수 있습니다,,, 슬라이드 쇼를 다시 실행하고 시도해 주세요,,,")
             self.slideshow_started = False
             return False
 
@@ -540,39 +534,32 @@ class OLEDMeasurementApp:
     def on_tab_changed(self, event):
         idx = self.tabs.index(self.tabs.select())
         if idx in [3, 4]:
-            if not self.slides:
-                messagebox.showwarning("경고", "PPT 파일을 로드하세요.")
+            if not self.slides_dict:
+                messagebox.showwarning("경고", "파워포인트를 먼저 동기화하세요.")
                 self.tabs.select(2)
                 return
-            if not self.slideshow_started: self.start_slideshow()
             
-            if self.slideshow_started:
-                self.check_ppt_sync()
+            if not self.check_ppt_sync():
+                self.tabs.select(2)
+                return
             
             if idx == 4:
-                self.current_slide_idx = 0
                 if self.presentation:
                     try:
                         self.presentation.SlideShowWindow.View.GotoSlide(1)
+                        self.current_slide_idx = 1
+                        self.tune_status.set("1번 슬라이더 대기 중")
+                        self.meas_status.set("1번 슬라이더 대기 중")
                     except Exception as e:
                         self.log_message(f"슬라이드 이동 오류: {e}")
                         
             self.update_tuning_info()
 
-    def start_slideshow(self):
-        try:
-            self.presentation.SlideShowSettings.Run()
-            self.slideshow_started = True
-            self.current_slide_idx = 0
-            self.log_message("PPT 슬라이드 쇼 시작")
-        except Exception as e:
-            messagebox.showerror("오류", f"슬라이드 쇼 시작 실패: {e}")
-
     def update_tuning_info(self):
-        if not self.slides: return
-        note = self.slides[self.current_slide_idx]
+        if not self.slides_dict: return
+        note = self.slides_dict.get(self.current_slide_idx, "")
         self.loc_var.set(note)
-        self.slide_num_var.set(f"{self.current_slide_idx + 1} / {len(self.slides)}")
+        self.slide_num_var.set(f"{self.current_slide_idx} / {len(self.slides_dict)}")
         
         match = re.search(r'\(\s*([\d.]+)\s*([mu]?a)?\s*\)', note, re.IGNORECASE)
         if match:
@@ -584,28 +571,63 @@ class OLEDMeasurementApp:
             self.tune_target_curr.set(f"{target_mA:.4f}")
         else:
             self.tune_target_curr.set("파싱 불가")
+            
+        if self.presentation:
+            gray_val = self.check_and_get_gray()
+            if gray_val != -1:
+                self.current_gray_var.set(str(gray_val))
+            else:
+                self.current_gray_var.set("에러 (패턴 없음/값 불일치/무채색 아님)")
+
+    def check_and_get_gray(self):
+        if not self.presentation: return -1
+        try:
+            slide = self.presentation.Slides(self.current_slide_idx)
+            first_gray = None
+            for shape in slide.Shapes:
+                try:
+                    rgb = shape.Fill.ForeColor.RGB
+                    r = rgb & 0xFF
+                    g = (rgb >> 8) & 0xFF
+                    b = (rgb >> 16) & 0xFF
+                    
+                    if not (r == g == b): 
+                        return -1
+                        
+                    if first_gray is None: 
+                        first_gray = r
+                    elif first_gray != r: 
+                        return -1
+                except: pass
+            return first_gray if first_gray is not None else -1
+        except Exception: 
+            return -1
 
     def move_slide(self, direction):
-        if not self.slides: return
+        if not self.slides_dict: return
         if not self.check_ppt_sync(): return
         new_idx = self.current_slide_idx + direction
-        if 0 <= new_idx < len(self.slides):
+        if 1 <= new_idx <= len(self.slides_dict):
             self.current_slide_idx = new_idx
             self.update_tuning_info()
-            self.tune_status.set(f"{new_idx + 1}번 슬라이더 대기 중")
-            self.meas_status.set(f"{new_idx + 1}번 슬라이더 대기 중")
+            self.tune_status.set(f"{new_idx}번 슬라이더 대기 중")
+            self.meas_status.set(f"{new_idx}번 슬라이더 대기 중")
             if self.presentation:
-                try: self.presentation.SlideShowWindow.View.GotoSlide(new_idx + 1)
+                try: self.presentation.SlideShowWindow.View.GotoSlide(new_idx)
                 except Exception as e: messagebox.showerror("오류", f"슬라이드 이동 실패: {e}")
 
     def change_ppt_shape_color(self, gray_val):
         if not self.check_ppt_sync(): return
         try:
             color_val = gray_val | (gray_val << 8) | (gray_val << 16)
-            slide = self.presentation.Slides(self.current_slide_idx + 1)
+            slide = self.presentation.Slides(self.current_slide_idx)
             for shape in slide.Shapes:
                 try:
                     shape.Fill.ForeColor.RGB = color_val
+                    # 선(테두리)이 활성화되어 있는 경우에만 색상 변경
+                    if shape.Line.Visible:
+                        shape.Line.ForeColor.RGB = color_val
+                                    
                 except:
                     pass
             RealDevice.current_gray = gray_val
@@ -613,7 +635,7 @@ class OLEDMeasurementApp:
             self.log_message(f"도형 색상 변경 실패: {e}")
 
     def run_auto_tune(self):
-        if not self.slides: return
+        if not self.slides_dict: return
         if not self.check_ppt_sync(): return
         
         target_str = self.tune_target_curr.get()
@@ -622,6 +644,13 @@ class OLEDMeasurementApp:
             return
             
         target_mA = float(target_str)
+        
+        range_str = self.k_curr_range.get()
+        range_max_ma = {"10uA": 0.01, "100uA": 0.1, "1mA": 1.0, "10mA": 10.0, "100mA": 100.0, "1A": 1000.0}.get(range_str, 10.0)
+        if target_mA > range_max_ma:
+            messagebox.showwarning("경고", f"타겟 전류({target_mA:.4f}mA)가 현재 설정된 측정 Range({range_str})를 초과할 수 있습니다.\n(작업은 계속 진행됩니다)")
+            self.log_message(f"경고: 타겟 전류({target_mA:.4f}mA)가 Range({range_str}) 초과 위험")
+            
         target_A = target_mA / 1000.0
         low, high = 0, 255
         best_gray = 0
@@ -639,6 +668,9 @@ class OLEDMeasurementApp:
         time.sleep(2.0)
         
         offset_A = RealDevice.get_keithley_data()
+        if offset_A == float('inf'):
+            messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다,,, Range 설정을 높여주세요,,,")
+            return
         offset_mA = offset_A * 1000.0
         
         try:
@@ -651,7 +683,6 @@ class OLEDMeasurementApp:
         time.sleep(0.5)
         
         self.log_message(f"목표 보정 전류 {target_mA:.4f}mA 튜닝 시작 (Offset: {offset_mA:.4f}mA)")
-
         
         while low <= high:
             mid = (low + high) // 2
@@ -662,29 +693,30 @@ class OLEDMeasurementApp:
             time.sleep(0.3)
     
             curr_A = RealDevice.get_keithley_data()
+            if curr_A == float('inf'):
+                messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다,,, Range 설정을 높여주세요,,,")
+                return
             comp_A = curr_A - offset_A
     
-            # 타겟과 현재 측정값의 오차 계산
             diff = abs(comp_A - target_A)
     
-            # 오차가 가장 작은 Gray 값 갱신
             if diff < min_diff:
                 min_diff = diff
                 best_gray = mid
         
-            # 전류가 타겟보다 작으면 Gray를 높이고, 크면 낮춤
             if comp_A < target_A:
                 low = mid + 1
             else:
                 high = mid - 1
 
-        # 탐색 완료 후 가장 타겟에 가까웠던 Gray 색상으로 최종 변경
         self.change_ppt_shape_color(best_gray)
         self.root.update()  
         time.sleep(0.3)    
                 
-
         final_curr_A = RealDevice.get_keithley_data()
+        if final_curr_A == float('inf'):
+            messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다,,, Range 설정을 높여주세요,,,")
+            return
         final_comp_A = final_curr_A - offset_A
         final_curr_mA = final_curr_A * 1000.0
         final_comp_mA = final_comp_A * 1000.0
@@ -692,7 +724,7 @@ class OLEDMeasurementApp:
         self.tune_status.set(f"완료! Gray: {best_gray}")
         self.log_message(f"튜닝 완료 (Gray: {best_gray}, 측정: {final_curr_mA:.4f}mA, 보정: {final_comp_mA:.4f}mA)")
         
-        res = [len(self.tune_tree.get_children())+1, self.current_slide_idx + 1, self.loc_var.get(), f"{target_mA:.4f}", best_gray, f"{offset_mA:.4f}", f"{final_curr_mA:.4f}", f"{final_comp_mA:.4f}"]
+        res = [len(self.tune_tree.get_children())+1, self.current_slide_idx, self.loc_var.get(), f"{target_mA:.4f}", best_gray, f"{offset_mA:.4f}", f"{final_curr_mA:.4f}", f"{final_comp_mA:.4f}"]
         self.tune_tree.insert("", "end", values=res)
         self.tune_tree.yview_moveto(1)
         
@@ -701,12 +733,25 @@ class OLEDMeasurementApp:
         self.move_slide(1)
 
     def run_measurement(self):
-        if not self.slides: return
+        if not self.slides_dict: return
         if not self.check_ppt_sync(): return
+        
+        gray_val = self.check_and_get_gray()
+        if gray_val == -1:
+            messagebox.showerror("에러", "패턴들의 gray 값이 서로 다르거나 무채색(white/gray)이 아닙니다.\n(측정은 계속 진행됩니다)")
+            gray_val = "에러"
         
         target_str = self.tune_target_curr.get()
         target_current = target_str if target_str != "파싱 불가" else "N/A"
         
+        if target_str != "파싱 불가":
+            target_mA = float(target_str)
+            range_str = self.k_curr_range.get()
+            range_max_ma = {"10uA": 0.01, "100uA": 0.1, "1mA": 1.0, "10mA": 10.0, "100mA": 100.0, "1A": 1000.0}.get(range_str, 10.0)
+            if target_mA > range_max_ma:
+                messagebox.showwarning("경고", f"타겟 전류({target_mA:.4f}mA)가 현재 설정된 측정 Range({range_str})를 초과할 수 있습니다.\n(측정은 계속 진행됩니다)")
+                self.log_message(f"경고: 타겟 전류({target_mA:.4f}mA)가 Range({range_str}) 초과 위험")
+                
         self.meas_status.set("블랙 화면 전환/Offset 측정 중...")
         self.log_message("블랙 화면 전환 및 Offset 전류 측정 중 (2초 대기)...")
         try:
@@ -719,6 +764,9 @@ class OLEDMeasurementApp:
         time.sleep(2.0)
         
         offset_A = RealDevice.get_keithley_data()
+        if offset_A == float('inf'):
+            messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다,,, Range 설정을 높여주세요,,,")
+            return
         offset_mA = offset_A * 1000.0
         
         self.meas_status.set("데이터 측정 중...")
@@ -732,23 +780,28 @@ class OLEDMeasurementApp:
         time.sleep(0.5)
         
         curr_A = RealDevice.get_keithley_data()
+        if curr_A == float('inf'):
+            messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다,,, Range 설정을 높여주세요,,,")
+            return
         curr_mA = curr_A * 1000.0
         comp_mA = curr_mA - offset_mA
         
         lv, sx, sy = RealDevice.get_ca310_data()
-        current_gray = RealDevice.current_gray
+        current_gray = gray_val 
+        RealDevice.current_gray = current_gray
+        self.current_gray_var.set(str(current_gray))
         
         self.meas_status.set("측정 완료!")
         self.log_message(f"최종 측정 기록 완료 (Gray: {current_gray})")
         
-        res = [len(self.measure_results)+1, self.current_slide_idx + 1, self.loc_var.get(), target_current, current_gray, f"{offset_mA:.4f}", f"{curr_mA:.4f}", f"{comp_mA:.4f}", f"{lv:.2f}", f"{sx:.4f}", f"{sy:.4f}"]
+        res = [len(self.measure_results)+1, self.current_slide_idx, self.loc_var.get(), target_current, current_gray, f"{offset_mA:.4f}", f"{curr_mA:.4f}", f"{comp_mA:.4f}", f"{lv:.2f}", f"{sx:.4f}", f"{sy:.4f}"]
         self.measure_results.append(res)
         self.measure_tree.insert("", "end", values=res)
         self.measure_tree.yview_moveto(1)
         
         self.root.update()
         time.sleep(1.0)
-        if self.current_slide_idx < len(self.slides) - 1:
+        if self.current_slide_idx < len(self.slides_dict):
             self.move_slide(1)
 
     def save_csv(self):
@@ -784,27 +837,10 @@ class OLEDMeasurementApp:
                 messagebox.showerror("저장 오류", str(e))
 
     def close_app(self):
-        # 1. 파워포인트 앱 안전하게 종료
-        if WIN32_AVAILABLE and self.ppt_app:
-            try:
-                if self.presentation:
-                    try: self.presentation.SlideShowWindow.View.Exit()
-                    except: pass
-                    self.presentation.Close()
-                self.ppt_app.Quit()
-            except: pass
+        self.ppt_app = None
+        self.presentation = None
             
-        # 2. 장비 연결 해제
         RealDevice.release_devices()
-        
-        # 3. 임시 파일 삭제 로직
-        if self.temp_ppt_path and os.path.exists(self.temp_ppt_path):
-            try:
-                time.sleep(1)  # 파워포인트 프로세스가 완전히 반환되기를 잠시 대기
-                os.remove(self.temp_ppt_path)
-            except Exception as e:
-                print(f"임시 파일 삭제 실패: {e}")
-                
         self.root.destroy()
 
 if __name__ == "__main__":
