@@ -33,17 +33,13 @@ class RealDevice:
             
             self.keithley_inst.write(b":SENS:FUNC 'CURR'\n")
             
-            if curr_range.lower() == "auto":
-                self.keithley_inst.write(b":SENS:CURR:RANG:AUTO ON\n")
-            else:
-                range_map = {"10uA": "10e-6", "100uA": "100e-6", "1mA": "1e-3", "10mA": "10e-3", "100mA": "100e-3", "1A": "1"}
-                r_val = range_map.get(curr_range, "100e-3")
-                self.keithley_inst.write(b":SENS:CURR:RANG:AUTO OFF\n")
-                self.keithley_inst.write(f":SENS:CURR:RANG {r_val}\n".encode('utf-8'))
+            # 연결 시 항상 1A 대기 모드로 설정
+            self.keithley_inst.write(b":SENS:CURR:RANG:AUTO OFF\n")
+            self.keithley_inst.write(b":SENS:CURR:RANG 1\n")
             
             self.keithley_inst.write(b":OUTP ON\n")
             
-            return True, f"[{port}] 실제 Keithley 2400 연결 성공 (Range: {curr_range})"
+            return True, f"[{port}] 실제 Keithley 2400 연결 성공 (대기 Range: 1A)"
         except Exception as e:
             return False, f"Keithley 연결 실패: {e}"
 
@@ -392,10 +388,18 @@ class OLEDMeasurementApp:
 
     def run_single_measurement(self):
         if self.is_measuring: return
+        if not self.k_connected or not self.ca_connected:
+            messagebox.showwarning("경고", "Keithley와 CA-310 장비를 모두 연결한 후 측정해주세요.")
+            return
+
         self.is_measuring = True
         try:
+            self.device.change_range(self.k_curr_range.get())
+            time.sleep(0.1) 
+            
             self.perform_measurement()
         finally:
+            self.device.change_range("1A")
             self.is_measuring = False
 
     def stop_measurement(self):
@@ -421,6 +425,9 @@ class OLEDMeasurementApp:
         self.log_message(f"연속 측정 시작 (총 {count}회, 간격 {interval}초)")
         
         try:
+            self.device.change_range(self.k_curr_range.get())
+            time.sleep(0.1)
+            
             for i in range(count):
                 if self.stop_requested:
                     self.log_message("사용자에 의해 연속 측정이 중단되었습니다.")
@@ -436,7 +443,8 @@ class OLEDMeasurementApp:
                 if i < count - 1:
                     self.wait(interval)
         finally:
-            self.log_message("연속 측정 종료")
+            self.device.change_range("1A")
+            self.log_message("연속 측정 종료 및 대기 모드(1A) 전환")
             self.is_measuring = False
 
     def clear_data(self):

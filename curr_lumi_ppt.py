@@ -35,17 +35,13 @@ class RealDevice:
             
             self.keithley_inst.write(b":SENS:FUNC 'CURR'\n")
             
-            if curr_range.lower() == "auto":
-                self.keithley_inst.write(b":SENS:CURR:RANG:AUTO ON\n")
-            else:
-                range_map = {"10uA": "10e-6", "100uA": "100e-6", "1mA": "1e-3", "10mA": "10e-3", "100mA": "100e-3", "1A": "1"}
-                r_val = range_map.get(curr_range, "100e-3")
-                self.keithley_inst.write(b":SENS:CURR:RANG:AUTO OFF\n")
-                self.keithley_inst.write(f":SENS:CURR:RANG {r_val}\n".encode('utf-8'))
+            # 연결 시 항상 1A 대기 모드로 설정
+            self.keithley_inst.write(b":SENS:CURR:RANG:AUTO OFF\n")
+            self.keithley_inst.write(b":SENS:CURR:RANG 1\n")
             
             self.keithley_inst.write(b":OUTP ON\n")
             
-            return True, f"[{port}] 실제 Keithley 2400 연결 성공 (Range: {curr_range})"
+            return True, f"[{port}] 실제 Keithley 2400 연결 성공 (대기 Range: 1A)"
         except Exception as e:
             return False, f"Keithley 연결 실패: {e}"
 
@@ -260,7 +256,7 @@ class OLEDMeasurementApp:
         guide.pack(fill="x", pady=5)
         ttk.Label(guide, text="1. 장비 [MENU] -> COMMUNICATION -> RS-232 선택\n2. Baud Rate를 9600으로 맞춤\n3. 장치 관리자에서 COM 포트 번호 확인 후 아래 입력").pack(anchor="w")
 
-        form = ttk.LabelFrame(frame, text=" 통 세부 설정 ", padding=15)
+        form = ttk.LabelFrame(frame, text=" 통신 세부 설정 ", padding=15)
         form.pack(fill="x", pady=10)
         ttk.Label(form, text="COM 포트:").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.k_port).grid(row=0, column=1, padx=10, sticky="w")
@@ -362,7 +358,6 @@ class OLEDMeasurementApp:
         ttk.Button(sync_frame, text="PPT 동기화 실행", command=self.resync_ppt_action, width=20).pack()
         
         guide_text = (
-            "첫 번째 슬라이드에는 offset 전류를 측정하도록 블랙 슬라이드를 추가해 주세요!\n"
             "슬라이드 노트에는 나중에 측정 데이터의 측정 위치를 식별할 수 있는 Label을 적어 주세요!\n"
             "그리고 각 슬라이드의 Target 전류는 슬라이드 노트에 ( 0.113 mA ) 와 같이 표기해 주세요!\n"
             "슬라이드 노트 작성 예) 양산 ( 0.231 mA )"
@@ -679,82 +674,90 @@ class OLEDMeasurementApp:
         best_gray = 0
         min_diff = float('inf')
         
-        self.tune_status.set("블랙 화면 전환/Offset 측정 중...")
-        self.log_message("블랙 화면 전환 및 Offset 전류 측정 중 (2초 대기)...")
         try:
-            self.presentation.SlideShowWindow.View.State = 1
-            self.presentation.SlideShowWindow.View.GotoSlide(self.current_slide_idx) 
-        except Exception as e:
-            messagebox.showerror("오류", f"화면 상태 복원 실패: {e}")
-            return
-            
-        self.root.update()
-        self.wait(2.0)
-        
-        offset_A = self.device.get_keithley_data()
-        if offset_A == float('inf'):
-            messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
-            return
-        offset_mA = offset_A * 1000.0
-        
-        try:
-            self.presentation.SlideShowWindow.View.State = 1
-        except Exception as e:
-            messagebox.showerror("오류", f"화면 상태 복원 실패: {e}")
-            return
-            
-        self.root.update()
-        self.wait(0.5)
-        
-        self.log_message(f"목표 보정 전류 {target_mA:.4f}mA 튜닝 시작 (Offset: {offset_mA:.4f}mA)")
-        
-        while low <= high:
-            mid = (low + high) // 2
-            self.change_ppt_shape_color(mid)
-    
-            self.tune_status.set(f"튜닝 중... Gray: {mid}")
+            self.device.change_range(self.k_curr_range.get())
+            time.sleep(0.1)
+
+            self.tune_status.set("블랙 화면 전환/Offset 측정 중...")
+            self.log_message("블랙 화면 전환 및 Offset 전류 측정 중 (2초 대기)...")
+            try:
+                self.presentation.SlideShowWindow.View.State = 1
+                self.presentation.SlideShowWindow.View.GotoSlide(self.current_slide_idx) 
+            except Exception as e:
+                messagebox.showerror("오류", f"화면 상태 복원 실패: {e}")
+                return
+                
             self.root.update()
-            self.wait(0.3)
-    
-            curr_A = self.device.get_keithley_data()
-            if curr_A == float('inf'):
+            self.wait(2.0)
+            
+            offset_A = self.device.get_keithley_data()
+            if offset_A == float('inf'):
                 messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
                 return
-            comp_A = curr_A - offset_A
-    
-            diff = abs(comp_A - target_A)
-    
-            if diff < min_diff:
-                min_diff = diff
-                best_gray = mid
-        
-            if comp_A < target_A:
-                low = mid + 1
-            else:
-                high = mid - 1
-
-        self.change_ppt_shape_color(best_gray)
-        self.root.update()  
-        self.wait(2.0) 
+            offset_mA = offset_A * 1000.0
+            
+            try:
+                self.presentation.SlideShowWindow.View.State = 1
+            except Exception as e:
+                messagebox.showerror("오류", f"화면 상태 복원 실패: {e}")
+                return
                 
-        final_curr_A = self.device.get_keithley_data()
-        if final_curr_A == float('inf'):
-            messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
-            return
-        final_comp_A = final_curr_A - offset_A
-        final_curr_mA = final_curr_A * 1000.0
-        final_comp_mA = final_comp_A * 1000.0
+            self.root.update()
+            self.wait(0.5)
+            
+            self.log_message(f"목표 보정 전류 {target_mA:.4f}mA 튜닝 시작 (Offset: {offset_mA:.4f}mA)")
+            
+            while low <= high:
+                mid = (low + high) // 2
+                self.change_ppt_shape_color(mid)
         
-        self.tune_status.set(f"완료! Gray: {best_gray}")
-        self.log_message(f"튜닝 완료 (Gray: {best_gray}, 측정: {final_curr_mA:.4f}mA, 보정: {final_comp_mA:.4f}mA)")
+                self.tune_status.set(f"튜닝 중... Gray: {mid}")
+                self.root.update()
+                self.wait(0.3)
         
-        res = [len(self.tune_tree.get_children())+1, self.current_slide_idx, self.loc_var.get(), f"{target_mA:.4f}", best_gray, f"{offset_mA:.4f}", f"{final_curr_mA:.4f}", f"{final_comp_mA:.4f}"]
-        self.tune_tree.insert("", "end", values=res)
-        self.tune_tree.yview_moveto(1)
+                curr_A = self.device.get_keithley_data()
+                if curr_A == float('inf'):
+                    messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
+                    return
+                comp_A = curr_A - offset_A
         
-        self.root.update()
-        self.wait(1.0)
-        self.move_slide(1)
+                diff = abs(comp_A - target_A)
+        
+                if diff < min_diff:
+                    min_diff = diff
+                    best_gray = mid
+            
+                if comp_A < target_A:
+                    low = mid + 1
+                else:
+                    high = mid - 1
+
+            self.change_ppt_shape_color(best_gray)
+            self.root.update()  
+            self.wait(2.0) 
+                    
+            final_curr_A = self.device.get_keithley_data()
+            if final_curr_A == float('inf'):
+                messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
+                return
+            final_comp_A = final_curr_A - offset_A
+            final_curr_mA = final_curr_A * 1000.0
+            final_comp_mA = final_comp_A * 1000.0
+            
+            self.tune_status.set(f"완료! Gray: {best_gray}")
+            self.log_message(f"튜닝 완료 (Gray: {best_gray}, 측정: {final_curr_mA:.4f}mA, 보정: {final_comp_mA:.4f}mA)")
+            
+            res = [len(self.tune_tree.get_children())+1, self.current_slide_idx, self.loc_var.get(), f"{target_mA:.4f}", best_gray, f"{offset_mA:.4f}", f"{final_curr_mA:.4f}", f"{final_comp_mA:.4f}"]
+            self.tune_tree.insert("", "end", values=res)
+            self.tune_tree.yview_moveto(1)
+            
+            self.root.update()
+            self.wait(1.0)
+            self.move_slide(1)
+            
+        finally:
+            self.device.change_range("1A")
+            self.log_message("튜닝 종료 및 대기 모드(1A) 전환")
 
     def run_measurement(self):
         if not self.slides_dict: return
@@ -777,59 +780,67 @@ class OLEDMeasurementApp:
                     messagebox.showwarning("경고", f"타겟 전류({target_mA:.4f}mA)가 현재 설정된 측정 Range({range_str})를 초과할 수 있습니다.\n(측정은 계속 진행됩니다)")
                     self.log_message(f"경고: 타겟 전류({target_mA:.4f}mA)가 Range({range_str}) 초과 위험")
                 
-        self.meas_status.set("블랙 화면 전환/Offset 측정 중...")
-        self.log_message("블랙 화면 전환 및 Offset 전류 측정 중 (2초 대기)...")
         try:
-            self.presentation.SlideShowWindow.View.State = 3
-        except Exception as e:
-            messagebox.showerror("오류", f"화면 상태 전환 실패: {e}")
-            return
+            self.device.change_range(self.k_curr_range.get())
+            time.sleep(0.1)
+
+            self.meas_status.set("블랙 화면 전환/Offset 측정 중...")
+            self.log_message("블랙 화면 전환 및 Offset 전류 측정 중 (2초 대기)...")
+            try:
+                self.presentation.SlideShowWindow.View.State = 3
+            except Exception as e:
+                messagebox.showerror("오류", f"화면 상태 전환 실패: {e}")
+                return
+                
+            self.root.update()
+            self.wait(2.0)
             
-        self.root.update()
-        self.wait(2.0)
-        
-        offset_A = self.device.get_keithley_data()
-        if offset_A == float('inf'):
-            messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
-            return
-        offset_mA = offset_A * 1000.0
-        
-        self.meas_status.set("데이터 측정 중...")
-        try:
-            self.presentation.SlideShowWindow.View.State = 1
-            self.presentation.SlideShowWindow.View.GotoSlide(self.current_slide_idx) 
-        except Exception as e:
-            messagebox.showerror("오류", f"화면 상태 복원 실패: {e}")
-            return
+            offset_A = self.device.get_keithley_data()
+            if offset_A == float('inf'):
+                messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
+                return
+            offset_mA = offset_A * 1000.0
             
-        self.root.update()
-        self.wait(0.5)
-        
-        curr_A = self.device.get_keithley_data()
-        if curr_A == float('inf'):
-            messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
-            return
-        curr_mA = curr_A * 1000.0
-        comp_mA = curr_mA - offset_mA
-        
-        lv, sx, sy = self.device.get_ca310_data()
-        current_gray = gray_val 
-        self.device.current_gray = current_gray
-        self.current_gray_var.set(str(current_gray))
-        
-        self.meas_status.set("측정 완료!")
-        self.log_message(f"최종 측정 기록 완료 (Gray: {current_gray})")
-        
-        current_time = datetime.now().strftime("%H:%M:%S")
-        res = [len(self.measure_results)+1, current_time, self.current_slide_idx, self.loc_var.get(), target_current, current_gray, f"{offset_mA:.4f}", f"{curr_mA:.4f}", f"{comp_mA:.4f}", f"{lv:.2f}", f"{sx:.4f}", f"{sy:.4f}"]
-        self.measure_results.append(res)
-        self.measure_tree.insert("", "end", values=res)
-        self.measure_tree.yview_moveto(1)
-        
-        self.root.update()
-        self.wait(1.0)
-        if self.current_slide_idx < len(self.slides_dict):
-            self.move_slide(1)
+            self.meas_status.set("데이터 측정 중...")
+            try:
+                self.presentation.SlideShowWindow.View.State = 1
+                self.presentation.SlideShowWindow.View.GotoSlide(self.current_slide_idx) 
+            except Exception as e:
+                messagebox.showerror("오류", f"화면 상태 복원 실패: {e}")
+                return
+                
+            self.root.update()
+            self.wait(0.5)
+            
+            curr_A = self.device.get_keithley_data()
+            if curr_A == float('inf'):
+                messagebox.showerror("측정 에러", "전류 값이 범위를 초과했습니다. Range 설정을 높여주세요.")
+                return
+            curr_mA = curr_A * 1000.0
+            comp_mA = curr_mA - offset_mA
+            
+            lv, sx, sy = self.device.get_ca310_data()
+            current_gray = gray_val 
+            self.device.current_gray = current_gray
+            self.current_gray_var.set(str(current_gray))
+            
+            self.meas_status.set("측정 완료!")
+            self.log_message(f"최종 측정 기록 완료 (Gray: {current_gray})")
+            
+            current_time = datetime.now().strftime("%H:%M:%S")
+            res = [len(self.measure_results)+1, current_time, self.current_slide_idx, self.loc_var.get(), target_current, current_gray, f"{offset_mA:.4f}", f"{curr_mA:.4f}", f"{comp_mA:.4f}", f"{lv:.2f}", f"{sx:.4f}", f"{sy:.4f}"]
+            self.measure_results.append(res)
+            self.measure_tree.insert("", "end", values=res)
+            self.measure_tree.yview_moveto(1)
+            
+            self.root.update()
+            self.wait(1.0)
+            if self.current_slide_idx < len(self.slides_dict):
+                self.move_slide(1)
+                
+        finally:
+            self.device.change_range("1A")
+            self.log_message("측정 종료 및 대기 모드(1A) 전환")
 
     def copy_selected_to_clipboard(self, tree, event=None):
         selected_items = tree.selection()
